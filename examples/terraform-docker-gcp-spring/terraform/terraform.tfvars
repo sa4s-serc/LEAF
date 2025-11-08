@@ -1,0 +1,5 @@
+project          = "leaf-test-2-spring-app"
+region           = "us-central1"
+db_name          = "petclinic"
+db_user          = "petclinic"
+db_pass          = "petclinic"

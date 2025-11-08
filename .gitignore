@@ -1,0 +1,47 @@
+.venv
+__pycache__
+.terraform
+.terraform.lock.hcl
+terraform.tfstate.backup
+parsed_infrastructure.json
+Deployment_Model.puml
+*/.env
+
+# Node dependencies
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Build files
+dist/
+build/
+.cache/
+.out/
+.vite/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.production.local
+.env.test.local
+
+# Editor & System files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+cloud-carbon-footprint/
+leaf-test-451123-8431f83cea76.json
+code_carbon.zip
+carbon_simulation/
+*.png
+*.mmd
+results/

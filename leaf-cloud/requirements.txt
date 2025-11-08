@@ -1,0 +1,10 @@
+PyYAML>=6.0.0
+python-hcl2>=6.0.0
+matplotlib>=3.3.0
+numpy>=2.1.0
+pysmt>=0.9.6
+flask>=2.0.0
+tabulate>=0.8.9
+flask-cors>=4.0.0
+pandas>=1.0.0
+python-hcl2>=3.0.0
