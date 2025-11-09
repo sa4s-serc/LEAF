@@ -159,9 +159,3 @@ CLI commands orchestrate each stage, while the Flask server wraps the same pipel
 - Energy and carbon calculations track token residence time and resource utilization, folding in regional grid mix metadata.
 
 This mapping ensures that every Terraform element contributes to a measurable block in the simulation, supporting the eco-centric analysis presented in the manuscript.
-
-## License & Availability
-**LEAF is currently under a closed license.**
-### Usage Restrictions
-- Commercial use not permitted
-- Redistribution not allowed
