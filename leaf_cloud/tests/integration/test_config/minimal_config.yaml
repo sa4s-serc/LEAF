@@ -1,0 +1,23 @@
+# Minimal test configuration
+name: "test-simulation"
+description: "Minimal test configuration for integration testing"
+
+duration: 60  # seconds
+
+resources:
+  - type: "gke_cluster"
+    name: "test-cluster"
+    region: "us-central1"
+    node_pools:
+      - name: "default-pool"
+        machine_type: "e2-standard-4"
+        node_count: 1
+
+workloads:
+  - name: "test-workload"
+    type: "burst"
+    start_time: 0
+    duration: 60
+    resources:
+      - name: "test-cluster"
+        utilization: 0.5

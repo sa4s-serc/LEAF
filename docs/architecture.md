@@ -1,6 +1,6 @@
 # LEAF-Cloud Architecture & Implementation Guide
 
-This document bridges the IEEE Software manuscript "LEAF: A Layered Eco-Centric Analytical Framework for Cloud Deployments" with the codebase located in this repository. 
+This document bridges the IEEE Software manuscript "LEAF: A Layered Emission Assessment Framework for Cloud Deployments" with the codebase located in this repository. 
 
 ## 1. Traceability Between Manuscript and Code
 

@@ -1,0 +1,197 @@
+# LEAF-Cloud Configuration Template
+# Save this file as 'config.yaml' in your project directory
+
+# Version of the configuration schema
+version: '1.0'
+
+# Base directory for relative paths
+base_dir: .
+
+# Directory containing Terraform configuration files
+terraform_dir: terraform
+
+# Output directory for results and logs
+output_dir: results
+
+# Feature flags
+collect_latency: true
+collect_energy: true
+collect_carbon: true
+collect_scaling: true
+enforce_constraints: true
+
+# Recovery settings
+recovery_strategy: retry  # Options: retry, ignore, abort
+max_retries: 3
+retry_delay: 5.0  # seconds
+
+# GCP settings
+gcp_region: us-central1
+gcp_project_id: your-project-id  # Replace with your GCP project ID
+
+# Simulation configuration
+simulation:
+  duration: 3600.0  # Total simulation time in seconds (1 hour)
+  time_step: 1.0    # Time between simulation steps in seconds
+  iterations: 1     # Number of simulation iterations to run
+  warmup_period: 60.0  # Time in seconds before starting metric collection
+  
+  # Workload configuration
+  workload_type: steady  # Options: steady, burst, custom
+  workload_params:
+    # For steady workload
+    rate: 100.0  # Requests per second
+    
+    # For burst workload (uncomment and adjust as needed)
+    # min_rate: 50.0
+    # max_rate: 1000.0
+    # burst_duration: 300.0  # seconds
+    # quiet_duration: 900.0  # seconds
+    
+    # For custom workload (uncomment and adjust as needed)
+    # data:
+    #   - time: 0      # Start time in seconds
+    #     rate: 100.0  # Requests per second
+    #   - time: 300    # After 5 minutes
+    #     rate: 500.0
+    #   - time: 600    # After 10 minutes
+    #     rate: 1000.0
+  
+  # Parallel execution
+  max_workers: 4  # Maximum number of worker threads
+
+# Logging configuration
+logging:
+  log_level: INFO  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_file: leaf_cloud.log  # Set to null or empty to disable file logging
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_mode: a  # File mode: 'a' for append, 'w' to overwrite
+
+# Model configurations
+models:
+  # Energy model configuration
+  energy:
+    weights:
+      compute: 1.0
+      storage: 0.7
+      network: 0.5
+      security: 0.3
+      default: 0.5
+    functions:
+      # Calibrated low fallback curves; specific resources override internally
+      compute:
+        idle: 0.05
+        coef: 0.2
+        exp: 1.2
+      storage:
+        idle: 0.05
+        coef: 0.15
+        exp: 1.1
+      network:
+        idle: 0.01
+        coef: 0.05
+        exp: 1.1
+      default:
+        idle: 0.05
+        coef: 0.2
+        exp: 1.2
+    # CCF-aligned coefficients (see GcpFootprintEstimationConstants.ts)
+    # Storage coefficients are Wh per TB-hour.
+    storage_ssd_wh_per_tb_hour: 1.2
+    storage_hdd_wh_per_tb_hour: 0.65
+    # Networking coefficient is kWh per gigabit transferred.
+    network_kwh_per_gbit: 0.001
+    # Average data center PUE used for non-compute energy.
+    pue_default: 1.1
+    # When true, summaries prefer the CCF-style energy/carbon view and
+    # treat orchestrator power as a fallback.
+    prefer_ccf_energy: true
+    # Optional Cloud Logging overhead model:
+    # when enabled, logging energy is modeled as a fixed fraction of total
+    # compute kWh in CCF-style summaries.
+    include_cloud_logging_overhead: false
+    logging_overhead_fraction_of_compute: 0.05
+
+  # Carbon model configuration
+  carbon:
+    regions:
+      # Emissions factors (kg CO2e per kWh) aligned with
+      # Cloud Carbon Footprint's CFE-aware getGCPEmissionsFactors.
+      us-central1: 0.2152373529
+      us-central2: 0.2152373529
+      us-east1: 0.3255
+      us-east4: 0.11124
+      us-east5: 0.11124
+      us-west1: 0.0072
+      us-west2: 0.0893
+      us-west3: 0.30912
+      us-west4: 0.28835
+      us-south1: 0.1776
+      asia-east1: 0.37848
+      asia-east2: 0.2592
+      asia-northeast1: 0.38976
+      asia-northeast2: 0.26496
+      asia-northeast3: 0.29325
+      asia-south1: 0.603
+      asia-south2: 0.61732
+      asia-southeast1: 0.35712
+      asia-southeast2: 0.5046
+      australia-southeast1: 0.47242
+      australia-southeast2: 0.35949
+      europe-central2: 0.4608
+      europe-north1: 0.01143
+      europe-southwest1: 0.121
+      europe-west1: 0.0198
+      europe-west2: 0.07396
+      europe-west3: 0.1076
+      europe-west4: 0.13301
+      europe-west6: 0.0129
+      europe-west8: 0.298
+      europe-west9: 0.059
+      northamerica-northeast1: 0.0
+      northamerica-northeast2: 0.00232
+      southamerica-east1: 0.02838
+      southamerica-west1: 0.0589
+      global: 0.2152373529
+    default_factor: 0.2152373529
+
+  # Latency model configuration
+  latency:
+    base_latency:
+      compute:
+        default: 10.0
+      storage:
+        default: 20.0
+      network:
+        default: 20.0
+      security:
+        default: 15.0
+      default: 20.0
+    stochastic_variation:
+      enabled: false
+      distribution: uniform  # Options: uniform, normal
+      params:
+        min: -0.1  # -10% variation
+        max: 0.1   # +10% variation
+    region_latency_factors:
+      us-central1_us-east1: 1.2
+      same-region: 1.0
+      different-region: 2.0
+
+  # Scaling model configuration
+  scaling:
+    request_capacity: 10.0
+    cpu_threshold: 0.8
+    memory_threshold: 0.8
+    min_pods: 1
+    max_pods: 100
+    scaling_buffer: 0.2
+    cooldown_period: 300  # seconds
+    default_iam_capacity: 10000
+    default_scc_monitored_assets: 100
+    default_scc_tier: STANDARD
+    default_armor_protection_tier: CLOUD_ARMOR
+
+# Add any additional custom configuration here
+# custom:
+#   my_setting: value

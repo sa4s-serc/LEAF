@@ -1,0 +1,623 @@
+import os
+import logging
+import json
+from typing import Any, Dict, Optional
+
+"""
+terraform/generator.py
+
+This module provides functionality to generate Terraform configuration files
+from simulation results. It creates resource blocks with optimized parameters
+based on the simulation output and produces deployable Terraform files.
+The module also tracks and reports changes between original and optimized configurations.
+"""
+
+# Configure logger
+logger = logging.getLogger(__name__)
+
+
+class TerraformGenerator:
+    """
+    Generates optimized Terraform configurations from LEAF-Cloud simulation results.
+    This class handles the translation of simulation output into valid Terraform
+    syntax and produces deployable Terraform files with optimized parameters.
+    """
+
+    def __init__(
+        self,
+        simulation_results: Dict[str, Any],
+        original_resources: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Initialize the TerraformGenerator with simulation results and optional original resources.
+
+        Args:
+            simulation_results: Results from the LEAF-Cloud simulation containing optimized resource configurations
+            original_resources: Original Terraform resources for comparison (optional)
+        """
+        self.simulation_results = simulation_results
+        self.original_resources = original_resources or {}
+        self.optimized_resources = self._extract_resources_from_simulation()
+        logger.info("TerraformGenerator initialized with simulation results")
+
+    def _extract_resources_from_simulation(self) -> Dict[str, Any]:
+        """
+        Extract resource configurations from simulation results with support for
+        various Terraform file structures.
+
+        Returns:
+            Dictionary of resources extracted from simulation results
+        """
+        resources = {}
+
+        # Handle both flat and nested resource structures
+        if "resources" in self.simulation_results:
+            # Handle structured format (grouped by resource type)
+            if isinstance(self.simulation_results["resources"], dict):
+                for res_type, res_configs in self.simulation_results[
+                    "resources"
+                ].items():
+                    if isinstance(res_configs, dict):
+                        for res_name, res_config in res_configs.items():
+                            res_id = f"{res_type}.{res_name}"
+                            resources[res_id] = {
+                                "type": res_type,
+                                "name": res_name,
+                                "config": res_config,
+                            }
+                            logger.debug(
+                                f"Extracted resource from simulation: {res_id}"
+                            )
+                    elif isinstance(res_configs, list):
+                        # Handle array of resources of the same type
+                        for idx, res_config in enumerate(res_configs):
+                            if (
+                                isinstance(res_config, dict)
+                                and "name" in res_config
+                            ):
+                                res_name = res_config.pop("name")
+                                res_id = f"{res_type}.{res_name}"
+                                resources[res_id] = {
+                                    "type": res_type,
+                                    "name": res_name,
+                                    "config": res_config,
+                                }
+                            else:
+                                res_name = f"generated_{idx}"
+                                res_id = f"{res_type}.{res_name}"
+                                resources[res_id] = {
+                                    "type": res_type,
+                                    "name": res_name,
+                                    "config": res_config,
+                                }
+                            logger.debug(
+                                f"Extracted resource from simulation: {res_id}"
+                            )
+            # Handle flat resource array
+            elif isinstance(self.simulation_results["resources"], list):
+                for res in self.simulation_results["resources"]:
+                    if (
+                        isinstance(res, dict)
+                        and "type" in res
+                        and "name" in res
+                    ):
+                        res_type = res.pop("type")
+                        res_name = res.pop("name")
+                        res_id = f"{res_type}.{res_name}"
+                        resources[res_id] = {
+                            "type": res_type,
+                            "name": res_name,
+                            "config": res,
+                        }
+                        logger.debug(
+                            f"Extracted resource from flat list: {res_id}"
+                        )
+
+        return resources
+
+    def generate_terraform_config(self) -> str:
+        """
+        Generate complete Terraform configuration from optimized resources.
+
+        Returns:
+            String containing the complete Terraform configuration
+        """
+        output = (
+            "# Generated by LEAF-Cloud - Optimized Terraform Configuration\n\n"
+        )
+
+        # Generate provider blocks if available
+        if "providers" in self.simulation_results:
+            for provider, config in self.simulation_results[
+                "providers"
+            ].items():
+                output += f'provider "{provider}" {{\n'
+                for key, value in config.items():
+                    output += f"  {self._format_attribute(key, value)}\n"
+                output += "}\n\n"
+
+        # Generate resource blocks
+        for res_id, resource in self.optimized_resources.items():
+            output += self.generate_resource_block(
+                resource["type"], resource["name"], resource["config"]
+            )
+            output += "\n"
+
+        return output
+
+    def generate_resource_block(
+        self,
+        resource_type: str,
+        resource_name: str,
+        resource_config: Dict[str, Any],
+    ) -> str:
+        """
+        Generate a Terraform resource block for a specific resource.
+
+        Args:
+            resource_type: Type of the resource (e.g., google_compute_instance)
+            resource_name: Name of the resource
+            resource_config: Configuration parameters for the resource
+
+        Returns:
+            String containing the Terraform resource block
+        """
+        block = f'resource "{resource_type}" "{resource_name}" {{\n'
+
+        # Add all configuration parameters
+        for key, value in resource_config.items():
+            block += f"  {self._format_attribute(key, value)}\n"
+
+        block += "}\n"
+        return block
+
+    def _format_attribute(self, name: str, value: Any, indent: int = 0) -> str:
+        """
+        Format a Terraform attribute with proper syntax based on value type.
+
+        Args:
+            name: Name of the attribute
+            value: Value of the attribute
+            indent: Current indentation level
+
+        Returns:
+            Formatted attribute string
+        """
+        indent_str = "  " * indent
+
+        if isinstance(value, dict):
+            result = f"{name} {{\n"
+            for k, v in value.items():
+                result += f"{indent_str}  {self._format_attribute(k, v, indent + 1)}\n"
+            result += f"{indent_str}}}"
+            return result
+        elif isinstance(value, list):
+            if not value:
+                return f"{name} = []"
+
+            # Check if the list contains dictionaries (blocks) or simple values
+            if all(isinstance(item, dict) for item in value):
+                result = ""
+                for item in value:
+                    result += f"{name} {{\n"
+                    for k, v in item.items():
+                        result += f"{indent_str}  {self._format_attribute(k, v, indent + 1)}\n"
+                    result += f"{indent_str}}}\n{indent_str}"
+                return result.rstrip()
+            else:
+                # Format as array
+                formatted_items = [self._format_value(item) for item in value]
+                return f"{name} = [{', '.join(formatted_items)}]"
+        else:
+            return f"{name} = {self._format_value(value)}"
+
+    def _format_value(self, value: Any) -> str:
+        """
+        Format a value for Terraform syntax.
+
+        Args:
+            value: The value to format
+
+        Returns:
+            Formatted value string
+        """
+        if value is None:
+            return "null"
+        elif isinstance(value, bool):
+            return str(value).lower()
+        elif isinstance(value, (int, float)):
+            return str(value)
+        else:
+            # Escape quotes in strings
+            escaped_value = str(value).replace('"', '\\"')
+            return f'"{escaped_value}"'
+
+    def write_terraform_files(self, output_dir: str) -> None:
+        """
+        Write generated Terraform configuration to files.
+
+        Args:
+            output_dir: Directory to write the files to
+            
+        Note:
+            This method will attempt to write all files even if some fail.
+            Errors are logged but not re-raised to allow partial success.
+        """
+        # Create output directory if it doesn't exist
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(f"Failed to create output directory {output_dir}: {str(e)}")
+            return
+
+        # Write main configuration
+        main_tf_path = os.path.join(output_dir, "main.tf")
+        try:
+            with open(main_tf_path, "w") as f:
+                f.write(self.generate_terraform_config())
+            logger.info(f"Successfully wrote Terraform config to {main_tf_path}")
+        except IOError as e:
+            logger.error(f"Failed to write main.tf: {str(e)}")
+
+        # Write variables if available
+        if "variables" in self.simulation_results:
+            variables_tf_path = os.path.join(output_dir, "variables.tf")
+            try:
+                with open(variables_tf_path, "w") as f:
+                    for var_name, var_config in self.simulation_results["variables"].items():
+                        f.write(f'variable "{var_name}" {{\n')
+                        if "description" in var_config:
+                            f.write(f'  description = "{var_config["description"]}"\n')
+                        if "type" in var_config:
+                            f.write(f'  type        = {var_config["type"]}\n')
+                        if "default" in var_config:
+                            f.write(f'  default     = {self._format_value(var_config["default"])}\n')
+                        f.write("}\n")
+                logger.info(f"Successfully wrote variables to {variables_tf_path}")
+            except IOError as e:
+                logger.error(f"Failed to write variables.tf: {str(e)}")
+
+        # Always try to write the optimization report, even if other files failed
+        report_path = os.path.join(output_dir, "optimization_report.json")
+        try:
+            changes = self.get_optimization_changes()
+            with open(report_path, "w") as f:
+                json.dump(changes, f, indent=2)
+            logger.info(f"Successfully wrote optimization report to {report_path}")
+        except IOError as e:
+            logger.error(f"Failed to write optimization report: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error generating optimization report: {str(e)}")
+        # End of write_terraform_files; generation of change details is handled by
+        # get_optimization_changes() above and written to the report.
+        return None
+        
+    def get_optimization_changes(self) -> Dict[str, Any]:
+        """
+        Get the differences between original and optimized resources.
+        
+        Returns:
+            Dictionary containing the changes made during optimization with the following structure:
+            {
+                "summary": {
+                    "total_resources": int,
+                    "modified_resources": int,
+                    "added_resources": int,
+                    "removed_resources": int,
+                    "total_attributes_changed": int
+                },
+                "resources": {
+                    "resource.id": {
+                        "action": "added|modified|removed",
+                        "changes": {},
+                        "configuration": {},  # For added resources
+                        "original_configuration": {}  # For removed resources
+                    }
+                }
+            }
+        """
+        changes = {
+            "summary": {
+                "total_resources": len(self.optimized_resources),
+                "modified_resources": 0,
+                "added_resources": 0,
+                "removed_resources": 0,
+                "total_attributes_changed": 0,
+            },
+            "resources": {}
+        }
+
+        # Process optimized resources to find added and modified resources
+        for res_id, resource in self.optimized_resources.items():
+            if res_id in self.original_resources:
+                # Compare configurations to find changes
+                orig_config = self.original_resources[res_id].get("config", {})
+                opti_config = resource.get("config", {})
+                
+                resource_changes = self._compare_configs(orig_config, opti_config)
+                
+                if resource_changes:
+                    changes["resources"][res_id] = {
+                        "action": "modified",
+                        "changes": resource_changes,
+                    }
+                    changes["summary"]["modified_resources"] += 1
+                    changes["summary"]["total_attributes_changed"] += len(resource_changes)
+            else:
+                # New resource
+                changes["resources"][res_id] = {
+                    "action": "added",
+                    "configuration": resource.get("config", {}),
+                }
+                changes["summary"]["added_resources"] += 1
+
+        # Find removed resources
+        orig_resource_ids = set(self.original_resources.keys())
+        opt_resource_ids = set(self.optimized_resources.keys())
+        removed_ids = orig_resource_ids - opt_resource_ids
+
+        for res_id in removed_ids:
+            changes["resources"][res_id] = {
+                "action": "removed",
+                "original_configuration": self.original_resources[res_id].get("config", {}),
+            }
+            changes["summary"]["removed_resources"] += 1
+
+        return changes
+
+    def _compare_configs(
+        self,
+        original_config: Dict[str, Any],
+        optimized_config: Dict[str, Any],
+        path: str = "",
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Compare original and optimized configurations to identify changes,
+        with support for nested structures.
+
+        Args:
+            original_config: Original resource configuration
+            optimized_config: Optimized resource configuration
+            path: Current path in nested structure
+
+        Returns:
+            Dictionary of changes with before/after values
+        """
+        changes = {}
+
+        # Check for modified attributes
+        for key, optimized_value in optimized_config.items():
+            current_path = f"{path}.{key}" if path else key
+
+            if key in original_config:
+                original_value = original_config[key]
+
+                # Handle nested dictionaries recursively
+                if isinstance(optimized_value, dict) and isinstance(
+                    original_value, dict
+                ):
+                    nested_changes = self._compare_configs(
+                        original_value, optimized_value, current_path
+                    )
+                    if nested_changes:
+                        changes.update(nested_changes)
+                # Handle lists with potential nested structures
+                elif isinstance(optimized_value, list) and isinstance(
+                    original_value, list
+                ):
+                    # If lists contain dictionaries, compare them item by item when possible
+                    if all(
+                        isinstance(x, dict) for x in optimized_value
+                    ) and all(isinstance(x, dict) for x in original_value):
+                        # Try to match items by unique identifiers if available
+                        if len(optimized_value) == len(original_value):
+                            for i, (orig_item, opt_item) in enumerate(
+                                zip(original_value, optimized_value)
+                            ):
+                                item_path = f"{current_path}[{i}]"
+                                nested_changes = self._compare_configs(
+                                    orig_item, opt_item, item_path
+                                )
+                                if nested_changes:
+                                    changes.update(nested_changes)
+                    elif original_value != optimized_value:
+                        changes[current_path] = {
+                            "before": original_value,
+                            "after": optimized_value,
+                            "percent_change": self._calculate_percent_change(
+                                original_value, optimized_value
+                            ),
+                        }
+                elif original_value != optimized_value:
+                    changes[current_path] = {
+                        "before": original_value,
+                        "after": optimized_value,
+                        "percent_change": self._calculate_percent_change(
+                            original_value, optimized_value
+                        ),
+                    }
+            else:
+                # Added attribute
+                changes[current_path] = {
+                    "before": None,
+                    "after": optimized_value,
+                    "percent_change": None,
+                }
+
+        # Check for removed attributes
+        for key in original_config:
+            current_path = f"{path}.{key}" if path else key
+            if key not in optimized_config:
+                changes[current_path] = {
+                    "before": original_config[key],
+                    "after": None,
+                    "percent_change": None,
+                }
+
+        return changes
+
+    def _calculate_percent_change(
+        self, original_value: Any, new_value: Any
+    ) -> Optional[float]:
+        """
+        Calculate the percentage change between two values with improved type handling.
+
+        Args:
+            original_value: Original value
+            new_value: New value
+
+        Returns:
+            Percentage change as a float or None if not applicable
+        """
+        try:
+            # Handle numeric strings
+            if isinstance(original_value, str) and isinstance(new_value, str):
+                # Try to convert strings to numbers if they represent numbers
+                try:
+                    if all(
+                        c.isdigit() or c in ".-" for c in original_value
+                    ) and all(c.isdigit() or c in ".-" for c in new_value):
+                        original_value = float(original_value)
+                        new_value = float(new_value)
+                except ValueError:
+                    return None  # Not numeric strings
+
+            if isinstance(original_value, (int, float)) and isinstance(
+                new_value, (int, float)
+            ):
+                if original_value == 0:
+                    # Special case for zero to infinity
+                    if new_value == 0:
+                        return 0.0  # No change
+                    return None  # Undefined percent change
+                return (
+                    (new_value - original_value) / abs(original_value)
+                ) * 100
+        except Exception as e:
+            logger.debug(f"Could not calculate percent change: {e}")
+
+        return None
+
+    def generate_optimization_summary(self) -> str:
+        """
+        Generate a human-readable summary of the optimization changes.
+
+        Returns:
+            String containing the optimization summary
+        """
+        changes = self.get_optimization_changes()
+        summary = "# LEAF-Cloud Optimization Summary\n\n"
+
+        summary += "## Overview\n\n"
+        summary += (
+            f"- Total resources: {changes['summary']['total_resources']}\n"
+        )
+        summary += f"- Modified resources: {changes['summary']['modified_resources']}\n"
+        summary += (
+            f"- Added resources: {changes['summary']['added_resources']}\n"
+        )
+        summary += f"- Removed resources: {changes['summary']['removed_resources']}\n\n"
+
+        summary += "## Resource Changes\n\n"
+
+        for res_id, change_info in changes["resources"].items():
+            action = change_info["action"]
+            summary += f"### {res_id} ({action})\n\n"
+
+            if action == "modified":
+                summary += "| Attribute | Before | After | % Change |\n"
+                summary += "|-----------|--------|-------|----------|\n"
+
+                for attr, attr_changes in change_info["changes"].items():
+                    before = str(attr_changes["before"])
+                    after = str(attr_changes["after"])
+                    percent = attr_changes["percent_change"]
+                    percent_str = (
+                        f"{percent:.2f}%" if percent is not None else "N/A"
+                    )
+
+                    summary += (
+                        f"| {attr} | {before} | {after} | {percent_str} |\n"
+                    )
+
+                summary += "\n"
+
+        return summary
+
+    def get_resource_improvement_metrics(self) -> Dict[str, Dict[str, float]]:
+        """
+        Calculate improvement metrics for each resource type.
+
+        Returns:
+            Dictionary with resource types and their improvement metrics
+        """
+        metrics = {}
+        changes = self.get_optimization_changes()
+
+        # Group changes by resource type
+        resource_type_changes = {}
+        for res_id, change_info in changes["resources"].items():
+            if change_info["action"] != "modified":
+                continue
+
+            resource_type = res_id.split(".")[0]
+            if resource_type not in resource_type_changes:
+                resource_type_changes[resource_type] = []
+
+            resource_type_changes[resource_type].append(change_info)
+
+        # Calculate metrics for each resource type
+        for res_type, res_changes in resource_type_changes.items():
+            metrics[res_type] = {
+                "energy_reduction_percent": 0.0,
+                "cost_reduction_percent": 0.0,
+                "carbon_reduction_percent": 0.0,
+                "performance_improvement_percent": 0.0,
+                "resource_count": len(res_changes),
+            }
+
+            # Extract metrics from changes if they exist
+            for change_info in res_changes:
+                for attr, attr_changes in change_info["changes"].items():
+                    if (
+                        attr == "energy_usage"
+                        and attr_changes["percent_change"] is not None
+                    ):
+                        metrics[res_type][
+                            "energy_reduction_percent"
+                        ] += -attr_changes["percent_change"]
+                    elif (
+                        attr == "cost"
+                        and attr_changes["percent_change"] is not None
+                    ):
+                        metrics[res_type][
+                            "cost_reduction_percent"
+                        ] += -attr_changes["percent_change"]
+                    elif (
+                        attr == "carbon_footprint"
+                        and attr_changes["percent_change"] is not None
+                    ):
+                        metrics[res_type][
+                            "carbon_reduction_percent"
+                        ] += -attr_changes["percent_change"]
+                    elif (
+                        attr == "performance"
+                        and attr_changes["percent_change"] is not None
+                    ):
+                        metrics[res_type][
+                            "performance_improvement_percent"
+                        ] += attr_changes["percent_change"]
+
+            # Calculate averages
+            if metrics[res_type]["resource_count"] > 0:
+                for key in [
+                    "energy_reduction_percent",
+                    "cost_reduction_percent",
+                    "carbon_reduction_percent",
+                    "performance_improvement_percent",
+                ]:
+                    metrics[res_type][key] /= metrics[res_type][
+                        "resource_count"
+                    ]
+
+        return metrics
