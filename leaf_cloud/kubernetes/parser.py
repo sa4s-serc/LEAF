@@ -83,6 +83,48 @@ class K8sResource:
         self.depends_on = [
             f"{ref.kind}/{ref.name}" for ref in self.owner_references if ref.name
         ]
+        self.depends_on.extend(self._extract_env_dependencies(self.spec))
+
+    def _extract_env_dependencies(self, spec: Dict[str, Any]) -> List[str]:
+        deps = set()
+        containers = []
+        
+        # Extract containers based on kind
+        if self.kind in ("Deployment", "StatefulSet", "DaemonSet", "Job"):
+            containers = spec.get("template", {}).get("spec", {}).get("containers", [])
+        elif self.kind == "Pod":
+            containers = spec.get("containers", [])
+            
+        if not isinstance(containers, list):
+            return []
+
+        import re
+        # Regex for "service:port" or just "service"
+        # We assume service names are lowercase, alphanumeric + hyphens
+        service_pattern = re.compile(r"^([a-z0-9-]+)(?::\d+)?$")
+
+        for c in containers:
+            if not isinstance(c, dict): 
+                continue
+            for env in c.get("env", []):
+                if not isinstance(env, dict):
+                    continue
+                val = str(env.get("value", ""))
+                if not val:
+                    continue
+                
+                match = service_pattern.match(val)
+                if match:
+                    service_name = match.group(1)
+                    # Filter out common non-service values (numbers, booleans, etc handled by regex mostly)
+                    # Also filter out very short names or common keywords if necessary
+                    if len(service_name) > 2 and not service_name.isdigit():
+                         # Add potential Deployment ID (since animation uses Deployments)
+                         deps.add(f"deployment::{self.namespace}/{service_name}")
+                         # Add potential Service ID
+                         deps.add(f"service::{self.namespace}/{service_name}")
+        
+        return list(deps)
 
     @property
     def resource_id(self) -> str:

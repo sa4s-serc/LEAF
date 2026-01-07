@@ -53,11 +53,99 @@ class EnergyModel:
         self.energy_functions: Dict[str, EnergyProfile] = config.functions
         self.custom_energy_profiles: Dict[str, EnergyProfile] = config.profiles
         self.resource_mapping: Dict[str, Resource] = {}  # Populated during calculation
+        
+        # CCF-aligned configuration
+        self.processor_min_watts = getattr(config, 'processor_min_watts', {})
+        self.processor_max_watts = getattr(config, 'processor_max_watts', {})
+        self.machine_type_to_processors = getattr(config, 'machine_type_to_processors', {})
+        self.regional_pue = getattr(config, 'regional_pue', {})
+        self.default_min_watts = getattr(config, 'default_min_watts', 0.68)
+        self.default_max_watts = getattr(config, 'default_max_watts', 4.11)
+        self.default_pue = getattr(config, 'default_pue', 1.10)
+        
         logger.info(
             f"Energy model initialized with {len(self.energy_weights)} weights, "
             f"{len(self.energy_functions)} functions, and "
-            f"{len(self.custom_energy_profiles)} custom profiles."
+            f"{len(self.custom_energy_profiles)} custom profiles. "
+            f"CCF processor tables: {len(self.processor_min_watts)} processors."
         )
+
+    def get_pue(self, region: Optional[str] = None) -> float:
+        """Get PUE (Power Usage Effectiveness) factor for a region."""
+        if region and region in self.regional_pue:
+            return self.regional_pue[region]
+        return self.default_pue
+
+    def get_processor_power_range(self, machine_type: Optional[str]) -> Tuple[float, float]:
+        """
+        Get (min_watts, max_watts) per vCPU for a given machine type.
+        
+        Uses CCF methodology: looks up machine type family -> processor -> power coefficients.
+        If machine type has multiple possible processors, averages across them.
+        
+        Args:
+            machine_type: GCE machine type (e.g., 'e2-standard-4', 'n2-standard-8')
+            
+        Returns:
+            Tuple of (min_watts_per_vcpu, max_watts_per_vcpu)
+        """
+        if not machine_type:
+            return (self.default_min_watts, self.default_max_watts)
+        
+        # Extract machine type family (e.g., 'e2' from 'e2-standard-4')
+        family = machine_type.lower().split("-")[0]
+        
+        # Look up possible processors for this family
+        processors = self.machine_type_to_processors.get(family)
+        if not processors:
+            logger.debug(f"No processor mapping for machine type '{machine_type}', using CCF defaults")
+            return (self.default_min_watts, self.default_max_watts)
+        
+        # Average power values across possible processors
+        min_values = [self.processor_min_watts.get(p, self.default_min_watts) for p in processors]
+        max_values = [self.processor_max_watts.get(p, self.default_max_watts) for p in processors]
+        
+        avg_min = sum(min_values) / len(min_values) if min_values else self.default_min_watts
+        avg_max = sum(max_values) / len(max_values) if max_values else self.default_max_watts
+        
+        return (avg_min, avg_max)
+
+    def calculate_ccf_power(
+        self,
+        vcpus: float,
+        utilization: float,
+        machine_type: Optional[str] = None,
+        region: Optional[str] = None,
+    ) -> float:
+        """
+        Calculate power consumption using CCF methodology.
+        
+        Formula: Power = (min_watts + (max_watts - min_watts) * utilization) * vcpus * PUE
+        
+        Args:
+            vcpus: Number of vCPUs
+            utilization: Utilization ratio (0.0 to 1.0)
+            machine_type: GCE machine type for processor-specific lookup
+            region: GCP region for PUE lookup
+            
+        Returns:
+            Power consumption in kilowatts (kW)
+        """
+        utilization = max(0.0, min(1.0, utilization))
+        vcpus = max(0.0, float(vcpus))
+        
+        # Get processor-specific power coefficients
+        min_watts, max_watts = self.get_processor_power_range(machine_type)
+        
+        # Get regional PUE
+        pue = self.get_pue(region)
+        
+        # CCF formula: linear interpolation between min and max watts
+        power_per_vcpu_watts = min_watts + (max_watts - min_watts) * utilization
+        
+        # Total power in watts, then convert to kW
+        total_power_watts = power_per_vcpu_watts * vcpus * pue
+        return total_power_watts / 1000.0
 
     def get_energy_weight(self, resource_type: str) -> float:
         """

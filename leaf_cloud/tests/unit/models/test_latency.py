@@ -291,5 +291,33 @@ class TestLatencyModel(unittest.TestCase):
         self.assertIn("raw", result["end_to_end"])
         self.assertIn("average", result["end_to_end"])
 
+    def test_region_path_applies_factor(self):
+        """Ensure region_path on token scales infrastructure latency."""
+        self.model.config.stochastic_variation["enabled"] = False
+        # Enable legacy processing for this test
+        self.model.config.legacy_region_processing = True
+        simulation_results = {
+            "token_flow_log": [
+                {
+                    "event": "token_completed",
+                    "token": {
+                        "id": "t-region",
+                        "creation_time": 0.0,
+                        "completion_time": 1.0,
+                        "attributes": {
+                            "region_path": ["us-central1", "us-east1"]
+                        }
+                    },
+                    "time": 1.0
+                }
+            ],
+            "resource_stats": []
+        }
+
+        result = self.model.calculate(simulation_results, self.resource_mapping)
+        avg_latency = result["end_to_end"]["average"]
+        # Base latency 1.0s * factor (1.5 from us-central1->us-east1) = 1.5s
+        self.assertAlmostEqual(avg_latency, 1.5, places=2)
+
 if __name__ == "__main__":
     unittest.main()

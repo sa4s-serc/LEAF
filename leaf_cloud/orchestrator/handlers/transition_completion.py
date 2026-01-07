@@ -135,7 +135,21 @@ class TransitionCompletionHandler(BaseEventHandler):
         try:
             for pid, toks in effective_input_tokens.items():
                 place_name = petri_net.places.get(pid).name if pid in petri_net.places else pid
+                region_hint = self._infer_region(place_name, transition_name or transition_id)
                 for token in toks[:]:
+                    try:
+                        if region_hint:
+                            # Use update_attribute to ensure the change persists (attributes property returns a copy)
+                            token.update_attribute("infrastructure_region", region_hint)
+                            
+                            # Also update path if needed
+                            attrs = token.attributes
+                            path = list(attrs.get("region_path") or [])
+                            if not path or path[-1] != region_hint:
+                                path.append(region_hint)
+                                token.update_attribute("region_path", tuple(path))
+                    except Exception:
+                        pass
                     try:
                         log_entry = TokenUtils.log_token_consumption(
                             token=token,
@@ -164,7 +178,13 @@ class TransitionCompletionHandler(BaseEventHandler):
         try:
             for out_pid, tokens in output_tokens_map.items():
                 place_name = petri_net.places.get(out_pid).name if out_pid in petri_net.places else out_pid
+                region_hint = self._infer_region(place_name, transition_name or transition_id)
                 for token in tokens:
+                    try:
+                        if region_hint:
+                            token.update_attribute("infrastructure_region", region_hint)
+                    except Exception:
+                        pass
                     log_entries.append(TokenUtils.log_token_production(
                         token=token,
                         transition_name=transition_name or transition_id,
@@ -218,4 +238,29 @@ class TransitionCompletionHandler(BaseEventHandler):
         # Return number of consumed tokens
         total_consumed = sum(len(toks) for toks in effective_input_tokens.values())
         return total_consumed, log_entries
+
+    def _infer_region(self, place_or_transition: str, transition_name: str) -> str | None:
+        """
+        Best-effort region inference from Petri net names. Matches resource names
+        in the model builder mapping to places/transitions, then returns the
+        resource.region if available.
+        """
+        try:
+            mb = getattr(self.orchestrator, "_model_builder", None)
+            mapping = getattr(mb, "resource_mapping", {}) if mb else {}
+            if not mapping:
+                return None
+
+            target_strs = [place_or_transition or "", transition_name or ""]
+            for res in mapping.values():
+                res_name = getattr(res, "name", None)
+                res_region = getattr(res, "region", None)
+                if not res_name or not res_region:
+                    continue
+                for candidate in target_strs:
+                    if res_name in candidate:
+                        return res_region
+        except Exception:
+            return None
+        return None
     

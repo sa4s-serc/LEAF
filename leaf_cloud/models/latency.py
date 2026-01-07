@@ -705,6 +705,14 @@ class LatencyModel:
         if not resource_type:
             raise ValueError("Resource type cannot be empty")
             
+        # Ensure resource_type is a string (handles Enum cases)
+        if not isinstance(resource_type, str):
+            # If it has a .value attribute (Enum-like), use that
+            if hasattr(resource_type, "value"):
+                 resource_type = str(resource_type.value)
+            else:
+                 resource_type = str(resource_type)
+            
         if not 0.0 <= utilization <= 1.0:
             raise ValueError(f"Utilization must be between 0.0 and 1.0, got {utilization}")
 
@@ -1022,6 +1030,27 @@ class LatencyModel:
             
             # Calculate infrastructure-internal latency (existing behavior)
             infrastructure_latency_seconds = token["completion_time"] - token["creation_time"]
+
+            # The orchestrator now applies per-hop regional latency during simulation (adding to completion_time).
+            # Therefore, we do NOT apply a post-hoc region_path multiplier here to avoid double-counting.
+            # However, for backward compatibility tests or legacy modes, we support it via config.
+            if getattr(self.config, "legacy_region_processing", False):
+                try:
+                    attrs = token.get("attributes", {}) if isinstance(token, dict) else {}
+                    region_path = attrs.get("region_path") or token.get("region_path")
+                    if isinstance(region_path, list) and len(region_path) > 1:
+                        factor = 1.0
+                        for i in range(1, len(region_path)):
+                            src_r = region_path[i - 1]
+                            dst_r = region_path[i]
+                            try:
+                                factor *= self.get_region_latency_factor(src_r, dst_r)
+                            except Exception:
+                                continue
+                        infrastructure_latency_seconds *= max(1.0, factor)
+                except Exception:
+                    pass
+            pass
             infrastructure_latencies.append(infrastructure_latency_seconds)
             
             if self.end_to_end_enabled:

@@ -364,7 +364,9 @@ class Token:
             return self._history.copy()
     
     def __hash__(self) -> int:
-        return hash((self._id, self._color, frozenset(self._attributes.items())))
+        # Hash should be stable and consistent with __eq__ (which uses only ID)
+        # Including mutable attributes in hash breaks Set/Dict when attributes change
+        return hash(self._id)
         
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, Token):
@@ -875,7 +877,7 @@ class Transition:
     """
     __slots__ = (
         '_id', '_name', '_delay', '_priority', '_guard', '_action', 
-        '_lock', '_enabled', '_last_fired', '__weakref__'
+        '_lock', '_enabled', '_last_fired', '_resource_id', '__weakref__'
     )
     
     # Class-level weak set to track all transition instances
@@ -894,6 +896,7 @@ class Transition:
         priority: int = 0,
         guard: Optional[Callable[[Dict[str, List[Token]]], bool]] = None,
         action: Optional[Callable[[Dict[str, List[Token]]], Dict[str, List[Token]]]] = None,
+        resource_id: Optional[str] = None,
     ):
         """Initialize a new transition.
         
@@ -907,6 +910,7 @@ class Transition:
             priority: Priority for concurrent transition firing (higher fires first)
             guard: Optional function that determines if the transition can fire
             action: Optional function to transform input tokens to output tokens
+            resource_id: Optional ID of the resource this transition is associated with
             
         Raises:
             PetriNetValidationError: If delay or priority are invalid
@@ -950,6 +954,7 @@ class Transition:
         self._priority = int(priority)
         self._guard = guard or self._DEFAULT_GUARD
         self._action = action or self._DEFAULT_ACTION
+        self._resource_id = resource_id
         self._lock = RLock()
         self._enabled = False
         self._last_fired: Optional[float] = None
@@ -993,6 +998,11 @@ class Transition:
             raise TypeError(f"Priority must be an integer, got {type(value).__name__}")
         with self._lock:
             self._priority = value
+
+    @property
+    def resource_id(self) -> Optional[str]:
+        """Get the resource ID this transition is associated with."""
+        return self._resource_id
     
     @property
     def is_enabled(self) -> bool:

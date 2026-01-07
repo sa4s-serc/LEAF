@@ -247,8 +247,23 @@ class TokenUtils:
             # Get infrastructure region (try to infer from token or use default)
             infrastructure_region = attributes.get('infrastructure_region')
             if not infrastructure_region:
-                # Try to infer from token history or use default
-                infrastructure_region = "us-central1"  # Default fallback
+                # Try to infer from token history or resource mapping on the fly
+                try:
+                    from ...simulation import get_current_simulation
+                    sim = get_current_simulation()
+                    mb = getattr(sim, "_model_builder", None) if sim else None
+                    mapping = getattr(mb, "resource_mapping", {}) if mb else {}
+                    if mapping:
+                        # Heuristic: first resource with a region
+                        for res in mapping.values():
+                            maybe_region = getattr(res, "region", None)
+                            if maybe_region:
+                                infrastructure_region = maybe_region
+                                break
+                except Exception:
+                    infrastructure_region = None
+                # Final fallback
+                infrastructure_region = infrastructure_region or "us-central1"
             
             # Convert infrastructure latency from seconds to milliseconds
             infrastructure_latency_ms = infrastructure_latency * 1000

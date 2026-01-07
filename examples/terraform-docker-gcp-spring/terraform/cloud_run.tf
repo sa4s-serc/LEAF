@@ -10,7 +10,7 @@ resource "google_cloud_run_service" "cr-aula-spring" {
         "autoscaling.knative.dev/maxScale" = "10"
 
         # allow up to 80 concurrent requests per container
-        "run.googleapis.com/concurrency"   = "250"
+        "run.googleapis.com/concurrency"   = "80"
         
         # bind to your Cloud SQL instance
         "run.googleapis.com/cloudsql-instances" = google_sql_database_instance.cs-aula-spring.connection_name

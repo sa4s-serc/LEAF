@@ -10,7 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..cost import InfracostEstimator
 from ..leaf import LEAFCloud
 from ..utils.results import SimulationResult as CanonicalSimulationResult
 from .synthetic_gke import create_synthetic_gke_cluster, SyntheticGKECluster
@@ -525,6 +524,10 @@ def run_simulation_with_metrics(
                 kubernetes_resources,
                 mode=mode,
                 input_type=adjusted_input_type or input_type,
+                terraform_path=None if synthetic_infra else terraform,
+                synthetic_infra=synthetic_infra,
+                k8s_fallback=k8s_fallback,
+                duration_seconds=duration,
             )
             logger.debug("Transformed simulation results")
 
@@ -542,24 +545,6 @@ def run_simulation_with_metrics(
             )
 
             analysis_results = results.get("analysis_results") or {}
-
-            # Cost metrics only apply when Terraform input is available
-            if terraform and not synthetic_infra:
-                logger.info("Calculating cost metrics using Infracost")
-                cost_metrics = _calculate_cost_metrics(terraform, duration)
-            else:
-                cost_metrics = {
-                    "total_monthly_cost": 0.0,
-                    "total_hourly_cost": 0.0,
-                    "total_simulation_cost": 0.0,
-                    "currency": "USD",
-                    "cost_by_service": {},
-                    "cost_by_resource_type": {},
-                    "cost_by_resource": {},
-                    "estimation_timestamp": datetime.utcnow().isoformat() + "Z",
-                    "error": "Cost metrics require Terraform input",
-                }
-            results["metrics"]["cost_metrics"] = cost_metrics
 
             fields_to_keep = [
                 "simulation_info",
@@ -620,76 +605,47 @@ def run_simulation_with_metrics(
 
 
 def _calculate_cost_metrics(terraform_path: str, duration_seconds: float) -> Dict[str, Any]:
-    """Calculate cost metrics using Infracost for the given Terraform configuration."""
+    """Calculate cost metrics using pricing.csv when plan.json is available."""
     try:
         terraform_dir = Path(terraform_path)
+        plan_path = terraform_dir / "plan.json"
 
-        terraform_subdir = terraform_dir / "terraform"
-        if terraform_subdir.exists() and terraform_subdir.is_dir():
-            tf_files_in_subdir = list(terraform_subdir.glob("*.tf"))
-            tf_files_in_main = list(terraform_dir.glob("*.tf"))
-
-            if tf_files_in_subdir and not tf_files_in_main:
-                actual_terraform_path = terraform_subdir
-                logger.info("Using Terraform subdirectory for cost estimation: %s", actual_terraform_path)
-            else:
-                actual_terraform_path = terraform_dir
-        else:
-            actual_terraform_path = terraform_dir
-
-        logger.info("Running cost estimation on: %s", actual_terraform_path)
-
-        estimator = InfracostEstimator(actual_terraform_path)
-        cost_data = estimator.estimate_costs()
-
-        if cost_data:
-            logger.info(
-                "Cost data received - Monthly: $%s, Hourly: $%s",
-                cost_data.total_monthly_cost,
-                cost_data.total_hourly_cost,
-            )
-        else:
-            logger.warning("No cost data received from estimator")
-
-        if not cost_data or cost_data.error:
-            logger.warning(
-                "Cost estimation failed: %s",
-                cost_data.error if cost_data else 'Unknown error'
-            )
+        if not plan_path.exists():
+            msg = f"plan.json not found at {plan_path}; skipping cost estimation"
+            logger.info(msg)
             return {
                 "total_monthly_cost": 0.0,
                 "total_hourly_cost": 0.0,
                 "total_simulation_cost": 0.0,
-                "currency": "USD",
+                "currency": "INR",
                 "cost_by_service": {},
                 "cost_by_resource_type": {},
                 "cost_by_resource": {},
-                "error": cost_data.error if cost_data else "Cost estimation failed"
+                "error": msg,
             }
 
-        cost_data.calculate_simulation_costs(duration_seconds)
+        from ..cost.pricing_csv_estimator import estimate_plan_costs
 
-        cost_by_resource: Dict[str, Any] = {}
-        for project in cost_data.projects:
-            for resource in project.resources:
-                resource_name = resource.name.split(".")[-1] if "." in resource.name else resource.name
-                cost_by_resource[resource_name] = resource.simulation_cost or 0.0
+        cost_data = estimate_plan_costs(
+            plan_path=plan_path,
+            duration_seconds=duration_seconds,
+        )
 
         logger.info(
-            "Cost estimation completed: $%s for %ss simulation",
-            f"{cost_data.total_simulation_cost:.4f}" if cost_data.total_simulation_cost is not None else "0.0000",
+            "Cost estimation completed (pricing.csv): ₹%s for %ss simulation",
+            f"{cost_data['total_simulation_cost']:.4f}",
             duration_seconds,
         )
 
         return {
-            "total_monthly_cost": cost_data.total_monthly_cost,
-            "total_hourly_cost": cost_data.total_hourly_cost,
-            "total_simulation_cost": cost_data.total_simulation_cost or 0.0,
-            "currency": cost_data.currency,
-            "cost_by_service": cost_data.cost_by_service,
-            "cost_by_resource_type": cost_data.cost_by_resource_type,
-            "cost_by_resource": cost_by_resource,
-            "estimation_timestamp": cost_data.estimation_timestamp
+            "total_monthly_cost": cost_data["total_monthly_cost"],
+            "total_hourly_cost": cost_data["total_hourly_cost"],
+            "total_simulation_cost": cost_data["total_simulation_cost"],
+            "currency": cost_data.get("currency", "INR"),
+            "cost_by_service": cost_data.get("cost_by_service", {}),
+            "cost_by_resource_type": cost_data.get("cost_by_resource_type", {}),
+            "cost_by_resource": cost_data.get("cost_by_resource", {}),
+            "estimation_timestamp": cost_data.get("estimation_timestamp"),
         }
 
     except Exception as exc:
@@ -698,12 +654,78 @@ def _calculate_cost_metrics(terraform_path: str, duration_seconds: float) -> Dic
             "total_monthly_cost": 0.0,
             "total_hourly_cost": 0.0,
             "total_simulation_cost": 0.0,
-            "currency": "USD",
+            "currency": "INR",
             "cost_by_service": {},
             "cost_by_resource_type": {},
             "cost_by_resource": {},
-            "error": f"Cost calculation error: {exc}"
+            "error": f"Cost calculation error: {exc}",
         }
+
+
+def _calculate_synthetic_cost_metrics(fallback_cfg: Dict[str, Any], duration_seconds: float, final_node_count: int = 0) -> Dict[str, Any]:
+    """Estimate cost for synthetic GKE fallback nodes using pricing.csv."""
+    from ..cost.pricing_csv_estimator import estimate_ir_costs
+
+    def _coerce_int(value: Any, default: int) -> int:
+        try:
+            iv = int(value)
+            return iv if iv > 0 else default
+        except (TypeError, ValueError):
+            return default
+
+    region = str(fallback_cfg.get("region") or "us-central1")
+    machine_type = str(fallback_cfg.get("machine_type") or "e2-standard-2")
+    disk_size_gb = float(fallback_cfg.get("disk_size_gb") or 100)
+    requested_default = _coerce_int(fallback_cfg.get("default_count"), 0)
+    min_count = _coerce_int(fallback_cfg.get("min_count"), 1)
+    initial_count = requested_default if requested_default > 0 else min_count
+    max_override = _coerce_int(fallback_cfg.get("max_count"), 0)
+    max_count = max(max_override, min_count) if max_override > 0 else max(initial_count + 4, min_count * 3)
+    baseline_nodes = min(initial_count, max_count)
+    node_count = final_node_count if final_node_count > 0 else baseline_nodes
+
+    ir = {
+        "resources": [
+            {
+                "type": "google_container_cluster",
+                "id": "synthetic-cluster",
+                "config": {"location": region},
+            },
+            {
+                "type": "google_container_node_pool",
+                "id": "synthetic-node-pool",
+                "config": {
+                    "location": region,
+                    "node_config": [
+                        {
+                            "machine_type": machine_type,
+                            "disk_size_gb": disk_size_gb,
+                        }
+                    ],
+                    "initial_node_count": node_count,
+                    "node_count": node_count,
+                    "autoscaling": [
+                        {
+                            "min_node_count": min_count,
+                            "max_node_count": max_count,
+                        }
+                    ],
+                },
+            },
+        ]
+    }
+
+    cost_data = estimate_ir_costs(ir=ir, duration_seconds=duration_seconds)
+    return {
+        "total_monthly_cost": cost_data["total_monthly_cost"],
+        "total_hourly_cost": cost_data["total_hourly_cost"],
+        "total_simulation_cost": cost_data["total_simulation_cost"],
+        "currency": cost_data.get("currency", "INR"),
+        "cost_by_service": cost_data.get("cost_by_service", {}),
+        "cost_by_resource_type": cost_data.get("cost_by_resource_type", {}),
+        "cost_by_resource": cost_data.get("cost_by_resource", {}),
+        "estimation_timestamp": cost_data.get("estimation_timestamp"),
+    }
 
 
 _NON_OPERATIONAL_K8S_RESOURCE_KINDS: set[str] = {
@@ -743,6 +765,10 @@ def _transform_raw_simulation_result(
     kubernetes_resources: Optional[List[Dict[str, Any]]] = None,
     mode: Optional[str] = None,
     input_type: Optional[str] = None,
+    terraform_path: Optional[str] = None,
+    synthetic_infra: bool = False,
+    k8s_fallback: Optional[Dict[str, Any]] = None,
+    duration_seconds: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Transform RawSimulationResult from LEAFCloud framework to expected format."""
     import statistics
@@ -1089,6 +1115,31 @@ def _transform_raw_simulation_result(
         scaling_metrics.setdefault("autoscaling_events", kube_scaling_metrics.get("autoscaling_events", []))
         # Count autoscaling actions (scale up/down) for UI
         scaling_metrics["scaling_events"] = len(kube_scaling_metrics.get("autoscaling_events", []))
+
+    # Cost metrics (after scaling so we can use final node counts for synthetic clusters)
+    final_nodes = 0
+    if kube_scaling_metrics:
+        final_nodes = int(float(kube_scaling_metrics.get("summary", {}).get("final_node_count") or 0))
+    duration_for_cost = duration_seconds if duration_seconds is not None else float(raw_result.metadata.duration_seconds or 0.0)
+    if terraform_path and not synthetic_infra:
+        logger.info("Calculating cost metrics using pricing.csv (plan.json)")
+        cost_metrics = _calculate_cost_metrics(terraform_path, duration_for_cost)
+    elif synthetic_infra and k8s_fallback:
+        logger.info("Calculating cost metrics for synthetic fallback cluster using pricing.csv (final nodes=%s)", final_nodes)
+        cost_metrics = _calculate_synthetic_cost_metrics(k8s_fallback, duration_for_cost, final_node_count=final_nodes)
+    else:
+        cost_metrics = {
+            "total_monthly_cost": 0.0,
+            "total_hourly_cost": 0.0,
+            "total_simulation_cost": 0.0,
+            "currency": "INR",
+            "cost_by_service": {},
+            "cost_by_resource_type": {},
+            "cost_by_resource": {},
+            "estimation_timestamp": datetime.utcnow().isoformat() + "Z",
+            "error": "Cost metrics require Terraform input",
+        }
+    metrics["cost_metrics"] = cost_metrics
 
     return {
         "success": True,

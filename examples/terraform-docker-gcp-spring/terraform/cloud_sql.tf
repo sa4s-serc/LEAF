@@ -4,7 +4,7 @@ resource "google_sql_database_instance" "cs-aula-spring" {
   region           = var.region
 
   settings {
-    tier = "db-n1-standard-8"
+    tier = "db-n1-standard-2"
     #db-g1-small
   }
 

@@ -16,6 +16,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Tuple,
     Type,
     Union,
     get_type_hints,
@@ -1180,16 +1181,97 @@ class LEAFCloudConfig:
 
     @dataclass
     class EnergyModelConfig:
-        """Configuration for energy consumption modeling."""
+        """Configuration for energy consumption modeling.
+        
+        Uses Cloud Carbon Footprint (CCF) methodology:
+        - Power = (min_watts + (max_watts - min_watts) * utilization) * vcpus * PUE
+        - Maps machine type families to processor-specific power coefficients
+        """
         weights: Dict[str, float] = field(default_factory=lambda: {
             "compute": 1.0, "storage": 0.7, "network": 0.5, "security": 0.3, "default": 0.5
         })
+        
+        # CCF Processor min/max watts per vCPU
+        # Source: cloud-carbon-footprint/packages/gcp/src/domain/GcpFootprintEstimationConstants.ts
+        processor_min_watts: Dict[str, float] = field(default_factory=lambda: {
+            "Cascade Lake": 0.64,
+            "Skylake": 0.65,
+            "Broadwell": 0.71,
+            "Haswell": 1.0,
+            "Coffee Lake": 1.14,
+            "Sandy Bridge": 2.17,
+            "Ivy Bridge": 3.04,
+            "AMD EPYC 1st Gen": 0.82,
+            "AMD EPYC 2nd Gen": 0.47,
+            "AMD EPYC 3rd Gen": 0.45,
+            "Unknown": 0.68,  # CCF default
+        })
+        
+        processor_max_watts: Dict[str, float] = field(default_factory=lambda: {
+            "Cascade Lake": 3.97,
+            "Skylake": 4.26,
+            "Broadwell": 3.69,
+            "Haswell": 4.74,
+            "Coffee Lake": 5.42,
+            "Sandy Bridge": 8.58,
+            "Ivy Bridge": 8.25,
+            "AMD EPYC 1st Gen": 2.55,
+            "AMD EPYC 2nd Gen": 1.69,
+            "AMD EPYC 3rd Gen": 2.02,
+            "Unknown": 4.11,  # CCF default
+        })
+        
+        # Map GCE machine type families to possible processors
+        machine_type_to_processors: Dict[str, Tuple[str, ...]] = field(default_factory=lambda: {
+            "e2": ("Skylake", "Broadwell", "Haswell", "AMD EPYC 2nd Gen"),
+            "n2": ("Cascade Lake",),
+            "n2d": ("AMD EPYC 2nd Gen",),
+            "t2d": ("AMD EPYC 3rd Gen",),
+            "n1": ("Skylake", "Broadwell", "Haswell", "Sandy Bridge", "Ivy Bridge"),
+            "c2": ("Cascade Lake",),
+            "c2d": ("AMD EPYC 3rd Gen",),
+            "c3": ("Cascade Lake",),  # Sapphire Rapids approximated
+            "m2": ("Broadwell", "Cascade Lake"),
+            "m1": ("Broadwell", "Skylake"),
+            "a2": ("Cascade Lake",),
+            "g2": ("Cascade Lake",),
+        })
+        
+        # Regional PUE (Power Usage Effectiveness) factors
+        # Source: cloud-carbon-footprint
+        regional_pue: Dict[str, float] = field(default_factory=lambda: {
+            "us-central1": 1.11,
+            "us-east1": 1.10,
+            "us-east4": 1.08,
+            "us-west1": 1.10,
+            "us-west2": 1.12,
+            "us-west3": 1.12,
+            "us-west4": 1.10,
+            "europe-west1": 1.09,
+            "europe-west2": 1.10,
+            "europe-west3": 1.10,
+            "europe-west4": 1.07,
+            "europe-north1": 1.08,
+            "asia-east1": 1.12,
+            "asia-southeast1": 1.14,
+            "asia-northeast1": 1.12,
+            "australia-southeast1": 1.11,
+            "global": 1.10,  # Default
+        })
+        
+        # CCF defaults (used when processor lookup fails)
+        default_min_watts: float = 0.68  # Watts per vCPU at idle
+        default_max_watts: float = 4.11  # Watts per vCPU at 100% util
+        default_pue: float = 1.10
+        
+        # Legacy fallback curves (only used if CCF lookup fails completely)
         functions: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
-            # These are fallback curves only; for CloudRun and CloudSQL we use calibrated per-class models.
-            "compute": {"idle": 0.01, "coef": 0.05, "exp": 1.1},
-            "storage": {"idle": 0.05, "coef": 0.15, "exp": 1.1},
-            "network": {"idle": 0.01, "coef": 0.05, "exp": 1.1},
-            "default": {"idle": 0.05, "coef": 0.2, "exp": 1.2},
+            # CCF-aligned fallback: idle + (max-idle)*util per vCPU, converted to kW
+            # 0.68W idle, 4.11W max per vCPU -> 0.00068 kW idle, 0.00343 kW coefficient per vCPU
+            "compute": {"idle": 0.00068, "coef": 0.00343, "exp": 1.0},
+            "storage": {"idle": 0.0012, "coef": 0.00065, "exp": 1.0},  # SSD ~1.2Wh/TB-hr
+            "network": {"idle": 0.001, "coef": 0.001, "exp": 1.0},
+            "default": {"idle": 0.00068, "coef": 0.00343, "exp": 1.0},
         })
         profiles: Dict[str, Any] = field(default_factory=lambda: {
             # Kubernetes workloads and cluster wrappers are logical resources; power is accounted for via nodes.
@@ -1248,7 +1330,16 @@ class LEAFCloudConfig:
             "default": {"threshold": 0.70, "factor": 2.0, "exp": 2.0},
         })
         region_latency_factors: Dict[str, float] = field(default_factory=lambda: {
-            "us-central1_us-east1": 1.2, "same-region": 1.0, "different-region": 2.0
+            # Specific cross-region factors
+            ("us-central1", "us-east1"): 1.2,
+            ("us-east1", "us-central1"): 1.2,
+            ("us-central1", "us-west1"): 1.3,
+            ("us-west1", "us-central1"): 1.3,
+            # Wildcards and fallback
+            ("*", "*"): 2.0,
+            "different-region": 2.0,
+            "same-region": 1.0,
+            "default": 2.0,
         })
         
         # New fields for end-to-end latency
@@ -1481,5 +1572,4 @@ def load_config(
         env_yaml_path=str(env_yaml_path) if env_yaml_path else None,
         env_prefix=env_prefix,
     )
-
 

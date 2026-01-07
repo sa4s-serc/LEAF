@@ -493,10 +493,27 @@ class ModelBuilder:
         res_config: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Common fields every LEAF‑Cloud resource needs (name/region/labels…)."""
-        region = self._get_dict_value(res_config, "region") \
-                 or self.env_config.get("region", "us-central1")
-        zone   = self._get_dict_value(res_config, "zone")   \
-                 or self.env_config.get("zone",   f"{region}-a")
+        region = self._get_dict_value(res_config, "region")
+        zone   = self._get_dict_value(res_config, "zone")
+
+        # If region is missing but zone is available (e.g., us-east1-a), derive it
+        if not region and isinstance(zone, str) and "-" in zone:
+            parts = zone.split("-")
+            if len(parts) >= 3:
+                region = "-".join(parts[:-1])
+
+        # Try to infer region from subnet URI if still missing
+        if not region:
+            subnet = self._get_dict_value(res_config, "subnetwork")
+            if isinstance(subnet, str) and "/regions/" in subnet:
+                try:
+                    region = subnet.split("/regions/")[1].split("/")[0]
+                except Exception:
+                    region = None
+
+        # Fall back to env config defaults
+        region = region or self.env_config.get("region", "us-central1")
+        zone   = zone   or self.env_config.get("zone",   f"{region}-a")
         return {
             "name":     res_name,
             "provider": "gcp",
@@ -2924,7 +2941,7 @@ class NetworkTopologyBuilder:
                 Place(id=pid, name=name, capacity=capacity)
             )
     
-    def ensure_transition(self, tid: str, name: str, delay: float, action) -> None:
+    def ensure_transition(self, tid: str, name: str, delay: float, action, resource_id: str = None) -> None:
         """Ensure a transition exists in the Petri net.
         
         Args:
@@ -2932,10 +2949,11 @@ class NetworkTopologyBuilder:
             name: The transition name
             delay: The transition delay
             action: The action to perform when the transition fires
+            resource_id: Optional ID of the resource this transition processes
         """
         if tid not in self.petri_net.transitions:
             self.petri_net.add_transition(
-                Transition(id=tid, name=name, delay=delay, action=action)
+                Transition(id=tid, name=name, delay=delay, action=action, resource_id=resource_id)
             )
     
     def ensure_arc(self, aid: str, place_id: str, transition_id: str, direction: str) -> None:
@@ -3002,6 +3020,7 @@ class NetworkTopologyBuilder:
             name=f"Process_{resource.name}",
             delay=delay,
             action=process_action,
+            resource_id=resource.id,
         )
         self.ensure_arc(
             f"Arc_In_{slot_place}_To_{t_id}", slot_place, t_id, "input"

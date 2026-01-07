@@ -952,6 +952,9 @@ class LEAFCloud:
                 except Exception as e:
                     logger.debug("Could not create LatencyModel: %s", str(e))
             
+            # Track prior resource region so we can apply cross-region latency factors
+            prev_region: Optional[str] = None
+
             # Generate time-series data for the simulation duration
             time_points = list(range(0, int(duration), int(step_duration)))
             timestamps = [start_time_ts + t for t in time_points]
@@ -977,17 +980,21 @@ class LEAFCloud:
                 tokens_processed_data = []
                 latency_data = []
                 
-                # Determine region based on resource configuration with better extraction
-                region = "us-central1"  # Default
+                # Determine region based on resource configuration; prefer explicit region,
+                # otherwise derive from zone by stripping the last segment (e.g., us-central1-a -> us-central1).
+                region = "us-central1"
                 if 'config' in resource and resource['config']:
-                    if 'zone' in resource['config']:
-                        zone = resource['config']['zone']
-                        if 'us-central1' in str(zone):
-                            region = "us-central1"
-                        elif 'us-east1' in str(zone):
-                            region = "us-east1"
-                        elif 'europe-west1' in str(zone):
-                            region = "europe-west1"
+                    cfg = resource['config']
+                    explicit_region = cfg.get('region')
+                    zone = cfg.get('zone')
+                    if isinstance(explicit_region, str) and explicit_region:
+                        region = explicit_region
+                    elif isinstance(zone, str) and zone:
+                        zone_str = str(zone)
+                        if "-" in zone_str:
+                            region = "-".join(zone_str.split("-")[:2])
+                        else:
+                            region = zone_str
 
                 for t in time_points:
                     # Base utilization influenced by workload rate
@@ -1047,6 +1054,19 @@ class LEAFCloud:
                     base_latency = 50  # Base latency
                     latency_factor = 1 + (utilization * 2)  # Higher utilization = higher latency
                     infrastructure_latency = base_latency * latency_factor * (1 + 0.3 * random.random())
+
+                    # Apply region-to-region factor if we have a previous region and a latency model
+                    if prev_region and latency_model is not None:
+                        try:
+                            region_factor = latency_model.get_region_latency_factor(prev_region, region)
+                            infrastructure_latency *= region_factor
+                        except Exception as e:
+                            logger.debug(
+                                "Could not apply region latency factor %s->%s: %s",
+                                prev_region,
+                                region,
+                                str(e),
+                            )
                     
                     # Calculate end-to-end latency if enabled (using cached model)
                     if latency_model is not None:
@@ -1076,6 +1096,9 @@ class LEAFCloud:
                         final_latency = infrastructure_latency
                     
                     latency_data.append(round(final_latency, 2))
+
+                # Update previous region for the next resource
+                prev_region = region
                 
                 # Convert data to TimeSeriesDataPoint format
                 # TimeSeriesDataPoint is already imported at module level
@@ -1176,26 +1199,27 @@ class LEAFCloud:
         cost_data = None
         if kwargs.get('enable_cost_analysis', False):
             try:
-                from .cost import InfracostEstimator
-                logger.info("Running cost estimation with Infracost")
-                
-                usage_file = kwargs.get('infracost_usage_file')
-                estimator = InfracostEstimator(
-                    terraform_dir=self.terraform_dir,
-                    usage_file=usage_file
-                )
-                
-                cost_metrics = estimator.estimate_costs()
-                if cost_metrics:
-                    # Calculate costs for simulation duration
-                    cost_metrics = estimator.calculate_duration_costs(duration)
-                    cost_data = cost_metrics.model_dump(mode="python")
-                    logger.info(f"Cost estimation completed: ${cost_metrics.total_simulation_cost:.4f} for {duration}s simulation")
+                plan_path = Path(self.terraform_dir) / "plan.json"
+                if not plan_path.exists():
+                    logger.info("Cost analysis skipped: plan.json not found at %s", plan_path)
                 else:
-                    logger.warning("Cost estimation failed")
-                    
-            except ImportError as e:
-                logger.warning(f"Cost estimation module not available: {e}")
+                    from .cost.pricing_csv_estimator import estimate_plan_costs
+
+                    pricing_csv = kwargs.get("pricing_csv")
+                    machine_types = kwargs.get("machine_types")
+                    logger.info("Running pricing.csv cost estimation using plan.json at %s", plan_path)
+                    cost_metrics = estimate_plan_costs(
+                        plan_path=plan_path,
+                        duration_seconds=duration,
+                        pricing_csv=pricing_csv,
+                        machine_types=machine_types,
+                    )
+                    cost_data = cost_metrics
+                    logger.info(
+                        "Cost estimation completed (pricing.csv): ₹%0.4f for %ss simulation",
+                        cost_metrics["total_simulation_cost"],
+                        duration,
+                    )
             except Exception as e:
                 logger.error(f"Error during cost estimation: {e}", exc_info=True)
 
@@ -2135,25 +2159,25 @@ class LEAFCloud:
             if hasattr(orchestrator_result, 'analysis_results') and isinstance(orchestrator_result.analysis_results, dict):
                 analysis_results = dict(orchestrator_result.analysis_results)
             
-            # Ensure latency analysis exists and populate resource_latency if needed
+            # Ensure latency analysis exists and populate resource_latency for redundancy
             if 'latency' in analysis_results:
                 latency_data = analysis_results['latency']
                 
-                # If resource_latency is missing or empty, try to populate from by_resource
-                if not latency_data.get('resource_latency'):
-                    by_resource = latency_data.get('by_resource', {})
-                    if by_resource:
-                        # Extract average latency for each resource
-                        resource_latency = {
-                            res_id: stats.get('average', 0.0)
-                            for res_id, stats in by_resource.items()
-                            if isinstance(stats, dict)
-                        }
-                        latency_data['resource_latency'] = resource_latency
-                        logger.debug(
-                            "Populated resource_latency from by_resource: %d resources",
-                            len(resource_latency)
-                        )
+                # ALWAYS populate resource_latency from by_resource for redundancy
+                # This provides a fallback field even when by_resource is the primary source
+                by_resource = latency_data.get('by_resource', {})
+                if by_resource:
+                    # Extract average latency for each resource
+                    resource_latency = {
+                        res_id: stats.get('average', 0.0)
+                        for res_id, stats in by_resource.items()
+                        if isinstance(stats, dict)
+                    }
+                    latency_data['resource_latency'] = resource_latency
+                    logger.debug(
+                        "Populated resource_latency from by_resource for redundancy: %d resources",
+                        len(resource_latency)
+                    )
 
         except Exception as e:
             logger.warning("Error updating analysis results with calculated latency: %s", str(e))
@@ -2164,25 +2188,27 @@ class LEAFCloud:
         cost_data = None
         try:
             if kwargs.get('enable_cost_analysis', False):
-                from .cost import InfracostEstimator
-                logger.info("Running cost estimation with Infracost for orchestrator result")
-                usage_file = kwargs.get('infracost_usage_file')
-                estimator = InfracostEstimator(
-                    terraform_dir=self.terraform_dir,
-                    usage_file=usage_file,
-                )
-                cost_metrics = estimator.estimate_costs()
-                if cost_metrics:
-                    cost_metrics = estimator.calculate_duration_costs(float(duration))
-                    cost_data = cost_metrics.model_dump(mode="python") if cost_metrics else None
-                    if cost_metrics:
-                        logger.info(
-                            f"Cost estimation completed: ${cost_metrics.total_simulation_cost:.4f} for {duration}s simulation"
-                        )
+                plan_path = Path(self.terraform_dir) / "plan.json"
+                if not plan_path.exists():
+                    logger.info("Cost analysis skipped: plan.json not found at %s", plan_path)
                 else:
-                    logger.warning("Cost estimation failed (no metrics returned)")
-        except ImportError as e:
-            logger.warning(f"Cost estimation module not available: {e}")
+                    from .cost.pricing_csv_estimator import estimate_plan_costs
+
+                    pricing_csv = kwargs.get("pricing_csv")
+                    machine_types = kwargs.get("machine_types")
+                    logger.info("Running pricing.csv cost estimation using plan.json at %s", plan_path)
+                    cost_metrics = estimate_plan_costs(
+                        plan_path=plan_path,
+                        duration_seconds=float(duration),
+                        pricing_csv=pricing_csv,
+                        machine_types=machine_types,
+                    )
+                    cost_data = cost_metrics
+                    logger.info(
+                        "Cost estimation completed (pricing.csv): ₹%0.4f for %ss simulation",
+                        cost_metrics["total_simulation_cost"],
+                        duration,
+                    )
         except Exception as e:
             logger.error(f"Error during cost estimation (orchestrator): {e}", exc_info=True)
 
@@ -2216,13 +2242,14 @@ class LEAFCloud:
             self.build_model()
         return self.model
 
-    def get_metrics_summary(self, result: "RawSimulationResult", detailed_latency: bool = False) -> str:
+    def get_metrics_summary(self, result: "RawSimulationResult", detailed_latency: bool = False, carbon_factor_bias: float = 1.0) -> str:
         """
         Generate a summary of the metrics from a simulation result.
 
         Args:
             result: The simulation result to summarize
             detailed_latency: If True, includes detailed latency information.
+            carbon_factor_bias: Multiplier for carbon calculations (from calibration).
 
         Returns:
             str: Formatted string containing the simulation metrics summary.
@@ -2386,9 +2413,9 @@ class LEAFCloud:
                     duration_hours = result.metadata.duration_seconds / 3600
                     energy_kwh = (avg_power * duration_hours) / 1000
 
-                    # Get carbon factor for region
+                    # Get carbon factor for region and apply bias
                     region = metrics.region
-                    carbon_factor = carbon_factors.get(region, carbon_factors.get("default", 0.45))
+                    carbon_factor = carbon_factors.get(region, carbon_factors.get("default", 0.45)) * carbon_factor_bias
                     carbon_kg = energy_kwh * carbon_factor
                     total_carbon_kg += carbon_kg
                     carbon_by_resource.append((resource_id, carbon_kg))
@@ -2458,17 +2485,19 @@ class LEAFCloud:
             
             cost_data = result.cost_data
             if isinstance(cost_data, dict):
+                currency = str(cost_data.get("currency", "USD"))
+                prefix = f"{currency} "
                 if 'total_simulation_cost' in cost_data:
-                    summary_lines.append(f"  Simulation Cost: ${cost_data['total_simulation_cost']:.4f}")
+                    summary_lines.append(f"  Simulation Cost: {prefix}{cost_data['total_simulation_cost']:.4f}")
                 if 'total_monthly_cost' in cost_data:
-                    summary_lines.append(f"  Monthly Cost: ${cost_data['total_monthly_cost']:.2f}")
+                    summary_lines.append(f"  Monthly Cost: {prefix}{cost_data['total_monthly_cost']:.2f}")
                 if 'total_hourly_cost' in cost_data:
-                    summary_lines.append(f"  Hourly Cost: ${cost_data['total_hourly_cost']:.4f}")
+                    summary_lines.append(f"  Hourly Cost: {prefix}{cost_data['total_hourly_cost']:.4f}")
                 
                 if 'by_resource' in cost_data:
                     summary_lines.append("  By Resource Type:")
                     for resource_type, cost in cost_data['by_resource'].items():
-                        summary_lines.append(f"    {resource_type}: ${cost:.4f}")
+                        summary_lines.append(f"    {resource_type}: {prefix}{cost:.4f}")
             
             summary_lines.append("")
 

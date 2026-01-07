@@ -9,12 +9,16 @@ kWh for energy).
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-# Common power constants (in kW)
-IDLE_POWER_PER_VCPU = 0.002  # 2W per vCPU
-IDLE_POWER_PER_GB_RAM = 0.00038  # 0.38W per GB
-ACTIVE_POWER_PER_VCPU = 0.015  # 15W per vCPU at 100% utilization
-ACTIVE_POWER_PER_GB_RAM = 0.0005  # 0.5W per GB at 100% utilization
-BASE_SYSTEM_POWER_KW = 0.04  # 40W base system power
+# Common power constants (in kW) - CCF-aligned
+# Source: Cloud Carbon Footprint methodology
+# Reference: https://github.com/cloud-carbon-footprint/cloud-carbon-footprint
+
+# CCF average values per vCPU (across processor types)
+IDLE_POWER_PER_VCPU = 0.00068  # 0.68W per vCPU (CCF default min_watts)
+IDLE_POWER_PER_GB_RAM = 0.000392  # 0.392W per GB (CCF memory coefficient)
+ACTIVE_POWER_PER_VCPU = 0.00343  # 3.43W additional per vCPU at 100% (4.11 - 0.68)
+ACTIVE_POWER_PER_GB_RAM = 0.0001  # 0.1W additional per GB at 100%
+BASE_SYSTEM_POWER_KW = 0.005  # 5W base system overhead (minimal for VMs)
 
 @dataclass(frozen=True)
 class MachinePowerCoefficients:

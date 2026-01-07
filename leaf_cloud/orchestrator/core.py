@@ -340,6 +340,25 @@ class Orchestrator:
                     latency_input,
                     mapping,
                 )
+                
+                # REDUNDANCY: Populate resource_latency from by_resource for backward compatibility
+                # This ensures the field is always available even if by_resource is the primary source
+                if "latency" in analysis:
+                    latency_data = analysis["latency"]
+                    by_resource = latency_data.get("by_resource", {})
+                    
+                    # Always populate/update resource_latency for fallback compatibility
+                    if by_resource:
+                        resource_latency = {
+                            res_id: stats.get("average", 0.0)
+                            for res_id, stats in by_resource.items()
+                            if isinstance(stats, dict) and "average" in stats
+                        }
+                        latency_data["resource_latency"] = resource_latency
+                        logger.debug(
+                            "Populated resource_latency from by_resource for redundancy: %d resources",
+                            len(resource_latency)
+                        )
             except Exception as e:
                 self._log_error("Failed to adapt token_flow_log for latency model", error=e)
 
@@ -1365,9 +1384,8 @@ class Orchestrator:
         """Find enabled transitions in the Petri Net and schedule their completion events.
 
         This drives real token traversal. It inspects the Petri Net for transitions
-        that can fire, computes each transition's delay, and enqueues a
-        `transition_completion` event at current_time + delay with the input/output
-        meta needed by the handler.
+        that can fire, computes each transition's delay (potentially region-aware),
+        and enqueues a `transition_completion` event.
         """
         try:
             if not hasattr(self, "_petri_net") or self._petri_net is None:
@@ -1379,11 +1397,123 @@ class Orchestrator:
                 if transition is None:
                     continue
 
-                # Determine delay from transition, default to 0.0
-                try:
-                    delay = float(transition.get_delay(input_tokens))
-                except Exception:
-                    delay = float(getattr(transition, "delay", 0.0) or 0.0)
+                # ------------------------------------------------------------------
+                # Dynamic Latency Calculation (Region-Aware)
+                # ------------------------------------------------------------------
+                delay = 0.0
+                calculated_delay = False
+                
+                # Check if we have a latency model and model builder to resolving regions
+                if (
+                    getattr(self, "latency_model", None) 
+                    and getattr(self, "model_builder", None)
+                    and hasattr(self.model_builder, "resource_mapping")
+                ):
+                    try:
+                        # 1. Identify Destination Region (from the resource associated with this transition)
+                        # We try to match transition name to a resource name
+                        dest_region = None
+                        resource_type = "unknown"
+                        utilization = 0.0
+                        
+                        # Use the property for safe access
+                        mb = self.model_builder
+                        if mb and hasattr(mb, "resource_mapping"):
+                            mapping = mb.resource_mapping
+                        else:
+                            mapping = {}
+                        
+                        # Direct lookup via transition.resource_id (preferred)
+                        res_id = getattr(transition, "resource_id", None)
+                        target_res = mapping.get(res_id) if res_id else None
+                        
+                        # Fallback to heuristic for legacy transitions without resource_id
+                        if not target_res:
+                            for res in mapping.values():
+                                rname = getattr(res, "name", "")
+                                if rname and rname in transition.name:
+                                    target_res = res
+                                    break
+                        
+                        if target_res:
+                            # Get region
+                            dest_region = getattr(target_res, "region", None)
+                            # Get resource type for base latency
+                            # Ensure it's a string even if it's an Enum
+                            rt = getattr(target_res, "resource_type", "unknown")
+                            if hasattr(rt, "value"):
+                                resource_type = str(rt.value)
+                            else:
+                                resource_type = str(rt)
+
+                            # Get current utilization for congestion
+                            # Fetch from metrics system if available, otherwise default to 0.0
+                            utilization = 0.0
+                            if getattr(target_res, "id", None):
+                                try:
+                                    # Try to get from metrics collector if available
+                                    if hasattr(self, "metrics") and self.metrics:
+                                        # Implementation depends on MetricsCollector interface
+                                        # Commonly it might have current utilization map
+                                        utilization = self.metrics.get_current_utilization(target_res.id)
+                                    # Fallback: check resource object directly if it tracks its own state
+                                    elif hasattr(target_res, "utilization"):
+                                        utilization = float(target_res.utilization)
+                                except Exception:
+                                    utilization = 0.0
+                        
+                        # 2. Identify Source Region (from incoming tokens)
+                        # We look at the tokens to see where they came from
+                        source_region = None
+                        
+                        # Flatten all input tokens
+                        all_input_tokens = []
+                        for toks in input_tokens.values():
+                            all_input_tokens.extend(toks)
+                            
+                        # Try to find a valid region on the tokens
+                        # (We prioritize the 'infrastructure_region' attribute if set by previous hop)
+                        for t in all_input_tokens:
+                            attrs = getattr(t, "attributes", {}) or {}
+                            r = attrs.get("infrastructure_region")
+                            if r:
+                                source_region = r
+                                break
+                        
+                        # Fallback: if no source region found (first hop), assume same region as destination
+                        if source_region is None and dest_region is not None:
+                            source_region = dest_region
+                        
+                        # 3. Calculate Delay
+                        # Only proceed if we have a valid resource type; otherwise fallback
+                        if resource_type is not None and str(resource_type) != "unknown":
+                            # If source/dest missing, the model handles it (usually 1.0 factor),
+                            # but we should at least have dest_region if we found the resource.
+                            delay = self.latency_model.calculate_transition_delay(
+                                resource_type=resource_type,
+                                utilization=utilization,
+                                source_region=source_region,
+                                dest_region=dest_region
+                            )
+                            # Convert milliseconds to seconds for simulation time
+                            delay = delay / 1000.0
+                            calculated_delay = True
+                            
+                            logger.debug(
+                                "Calculated dynamic delay for transition %s: %.4fs (src=%s, dst=%s, type=%s)",
+                                transition.name, delay, source_region, dest_region, resource_type
+                            )
+
+                    except Exception as e:
+                        logger.warning("Failed to calculate dynamic latency for %s: %s", transition.name, e)
+                        calculated_delay = False
+
+                # Fallback to static delay if dynamic calculation failed or was skipped
+                if not calculated_delay:
+                    try:
+                        delay = float(transition.get_delay(input_tokens))
+                    except Exception:
+                        delay = float(getattr(transition, "delay", 0.0) or 0.0)
 
                 fire_time = self._current_time + max(0.0, delay)
 

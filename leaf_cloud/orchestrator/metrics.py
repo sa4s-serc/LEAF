@@ -354,26 +354,9 @@ class MetricsCollector:
                             exc_info=logger.isEnabledFor(logging.DEBUG)
                         )
                 
-                # Record carbon emissions if carbon model is available and we have power data
-                power_series = stats.metrics.get('power_consumption', [])
-                if carbon_model is not None and power_series:
-                    try:
-                        # Convert last power sample (W) over small interval (s) to energy (kWh)
-                        interval_seconds = 0.1
-                        last_power_w = float(power_series[-1].value)
-                        energy_kwh = (last_power_w / 1000.0) * (interval_seconds / 3600.0)
-                        region = getattr(resource, 'region', getattr(self.config, 'default_region', 'unknown'))
-                        carbon = carbon_model.calculate_resource_carbon(energy_kwh, region)
-                        stats.add_carbon_emissions(timestamp, carbon)
-                        if int(timestamp) <= 1:
-                            logger.debug("Fallback: computed carbon via energy slice for %s", resource_id)
-                    except Exception as e:
-                        logger.warning(
-                            "Error calculating carbon for %s: %s", 
-                            resource_id, 
-                            str(e),
-                            exc_info=logger.isEnabledFor(logging.DEBUG)
-                        )
+                # NOTE: Carbon emissions are calculated post-simulation by CarbonModel.calculate()
+                # in orchestrator/core.py:_run_post_simulation_analysis() using the correct
+                # time intervals from the utilization data. No incremental carbon tracking needed here.
                 
                 # Record state changes if the resource has a state attribute
                 if hasattr(resource, 'state'):
@@ -789,6 +772,27 @@ class MetricsCollector:
         except Exception:
             # Do not fail metrics collection if types import is unavailable
             pass
+
+    def get_current_utilization(self, resource_id: ResourceID) -> float:
+        """Get the most recent utilization value for a resource.
+        
+        Args:
+            resource_id: The resource identifier to look up.
+            
+        Returns:
+            The latest utilization ratio (0.0 to 1.0), or 0.0 if no data exists.
+        """
+        try:
+            stats = self.resource_stats.get(resource_id)
+            if not stats:
+                return 0.0
+            util_series = stats.metrics.get('utilization', [])
+            if not util_series:
+                return 0.0
+            # Return the most recent value
+            return float(util_series[-1].value)
+        except Exception:
+            return 0.0
     
     def _calculate_average_utilization(
         self, 

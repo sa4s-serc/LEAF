@@ -53,7 +53,7 @@ def _load_builtin_calibration(terraform_dir: Optional[Union[str, Path]]) -> Dict
                 "energy_bias_compute": 2.45,
                 "energy_bias_network": 1.766663586777717,
                 # Pulls per-hour carbon for this stack near ~420 g/h at 500 rps
-                "carbon_factor_bias": 1.02,
+                "carbon_factor_bias": 1.0,
             }
         # Docker GCP Spring example defaults (examples/terraform-docker-gcp-spring/terraform)
         if Path(terraform_dir).name.lower() == "terraform" and Path(terraform_dir).parent.name.lower() == "terraform-docker-gcp-spring":
@@ -69,7 +69,7 @@ def _load_builtin_calibration(terraform_dir: Optional[Union[str, Path]]) -> Dict
                 "sql_base_w": 0.1,
                 "sql_vcpu_w": 10.0,
                 "sql_mem_gb_w": 1.0,
-                "carbon_factor_bias": 2.2,
+                "carbon_factor_bias": 1.0,
             }
     except Exception:
         # Never block simulation startup on calibration fallback
@@ -396,6 +396,13 @@ def run_simulation_core(
         energy_metrics = {}
         carbon_metrics = {}
         
+        # Initialize carbon_factor_bias from calibration params (needed for get_metrics_summary)
+        params = _merge_calibration_params(kwargs.get('parameters') or {}, terraform_dir, log_errors=False)
+        try:
+            carbon_factor_bias = float(params.get('carbon_factor_bias', 1.0))
+        except Exception:
+            carbon_factor_bias = 1.0
+        
         try:
             # Calculate energy and carbon metrics from the simulation result
             if hasattr(result, 'resource_metrics') and result.resource_metrics:
@@ -516,7 +523,7 @@ def run_simulation_core(
         
         try:
             # Get the metrics summary from the framework
-            metrics_summary = framework.get_metrics_summary(result, detailed_latency=False)
+            metrics_summary = framework.get_metrics_summary(result, detailed_latency=False, carbon_factor_bias=carbon_factor_bias)
             print(metrics_summary)
         except Exception as e:
             logger.warning(f"Could not generate metrics summary: {e}")

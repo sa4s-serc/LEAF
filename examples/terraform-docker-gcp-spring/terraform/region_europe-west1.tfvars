@@ -1,2 +1,0 @@
-region = "europe-west1"
-
